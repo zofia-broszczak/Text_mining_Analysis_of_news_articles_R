@@ -14,10 +14,15 @@ The predefined news categories (World, Sports, Business, Sci/Tech) are used only
 ## Repository Structure
 .
 ├── data/
+
 │ ├── train.csv
+
 │ └── test.csv
+
 ├── README.md
+
 ├── Text mining analysis of news articles.Rmd
+
 └── Text-mining-analysis-of-news-articles.html
 
 
