@@ -1,0 +1,845 @@
+---
+title: "Text Mining analysis of news articles"
+author: "Berker Basergun, Zofia Broszczak, Anna Lorenz"
+date: "2026-01-06"
+output: html_document
+---
+
+Course: Text Mining and Social Media Mining
+
+Instructor: PhD Karolina Kuligowska
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Imports
+library(dplyr)
+library(tm)
+library(SnowballC)
+library(factoextra)
+library(cluster)
+library(wordcloud)
+library(RColorBrewer)
+library(DT)
+library(slam)
+library(tidytext)
+library(topicmodels)
+library(ggplot2)
+library(tibble)
+library(reshape2)
+library(tidyverse)
+library(igraph)
+library(networkD3)
+library(glue)
+
+# Custom color palette
+green_palette <- c("#C8D9C1",
+                   "#8FB996",
+                   "#4F7F6A",
+                   "#1F4D3A")
+```
+
+# 1. Introduction
+
+The aim of this project is to apply selected text mining methods to explore news articles from the AG's News Topic Classification Dataset. The analysis adopts an exploratory, unsupervised approach, focusing on understanding how news content is structured and how different types of information are expressed.
+
+Three analytical perspectives are used:
+
+  - Clustering of article titles is used to examine document-level similarity and identify natural groupings of news items,
+  - Topic modeling applied to article descriptions is used to uncover latent thematic structures within the corpus,
+  - Network analysis of word co-occurrences in titles is used to investigate linguistic relationships across different news categories.
+
+Although the dataset includes predefined class labels (World, Sports, Business, Sci/Tech), these labels are used only as a reference for interpretation and comparison of results, rather than for model training. This allows us to assess whether the observed textual patterns align with the existing categorization of news articles.
+
+## 1.2. Dataset description
+
+The dataset used in this project is the AG's News Topic Classification Dataset, available on Kaggle: https://www.kaggle.com/datasets/amananandrai/ag-news-classification-dataset
+
+The dataset originates from the AG corpus, a large collection of over one million news articles gathered from more than 2,000 news sources by the academic news search engine ComeToMyHead.
+
+The AG’s News dataset consists of news articles grouped into four major categories:
+
+  - World (1)
+  - Sports (2)
+  - Business (3)
+  - Sci/Tech (4)
+
+Each observation contains three variables:
+
+  - Class label (an integer from 1 to 4 indicating the news category),
+  - Title,
+  - Description (a brief summary providing additional context about the article).
+
+The original dataset is split into train and test subsets, but for the purpose of this project, both subsets are merged into a single dataset in order to maximize the amount of available text and ensure more stable unsupervised results.
+
+## 1.3. Hypothesis
+The main hypothesis of this project is to verify whether the data naturally groups into four predefined categories (World, Sports, Business, Sci/Tech) and the degree of alignment between clusters and the original class labels.
+
+# 2. Loading and merging the data
+In this step, we are loading the train and test datasets and merging them.
+
+#### Train data
+
+```{r load_train}
+# Adding the "data" folder with the "train.csv" file to the same folder as you have the .Rmd file
+train <- read.csv('data/train.csv')
+train <- tibble(train)
+head(train)
+```
+
+#### Test data
+
+```{r load_test}
+# Adding the "data" folder with the "test.csv" file to the same folder as you have the .Rmd file
+test <- read.csv('data/test.csv')
+test <- tibble(test)
+head(test)
+```
+
+#### Merging data
+
+```{r merge}
+data <- rbind(train, test)
+
+# Mapping classes for future usage in plots
+class <- c(
+  "1" = "World",
+  "2" = "Sports",
+  "3" = "Business",
+  "4" = "Sci/Tech"
+)
+
+data$Class.Name <- class[as.character(data$Class.Index)]
+
+data <- data %>% mutate(doc_id = row_number())
+
+data <- tibble(data)
+head(data)
+cat("Number of rows: ", nrow(data))
+```
+
+After merging, the dataset contains 127,600 observations in total.
+
+# 3. Preprocessing
+
+Data preprocessing is needed to make the data ready for the analysis and visualizations. Preprocessing was done separately for title data and description data since both will be used in further analyses. 
+
+## 3.1. Title preprocessing
+
+For title column preprocessing we remove unnecessary whitespaces, punctuation, numbers, stopwords and HTML artifacts, converted words to lowercase, cleaned the text of useless characters and applied stemming. Finally, we remove empty observations from the title corpus.
+
+```{r title_preproc, message=FALSE, warning=FALSE}
+# Setting up corpus
+title_source <- VectorSource(data$Title)
+title_corpus <- Corpus(title_source)
+
+# Cleaning
+title_corpus <- tm_map(title_corpus, removePunctuation)
+title_corpus <- tm_map(title_corpus, content_transformer(tolower))
+title_corpus <- tm_map(title_corpus, removeNumbers)
+title_corpus <- tm_map(title_corpus, removeWords, stopwords("english"))
+
+# Preliminary cleaning, substituting "/", "\", "@", "$" and "&" by a space.
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+title_corpus <- tm_map(title_corpus, toSpace, "/")
+title_corpus <- tm_map(title_corpus, toSpace, "\\\\")
+title_corpus <- tm_map(title_corpus, toSpace, "@")
+title_corpus <- tm_map(title_corpus, toSpace, "\\$")
+title_corpus <- tm_map(title_corpus, toSpace, "&")
+title_corpus <- tm_map(title_corpus, toSpace, "\\)")
+title_corpus <- tm_map(title_corpus, toSpace, "\\(")
+title_corpus <- tm_map(title_corpus, stripWhitespace)
+title_corpus <- tm_map(title_corpus, removeWords, c("monday","tuesday","wednesday","thursday","friday","saturday","sunday", "year","years","week","weeks", "day", "days", "one","two","three","first","second",
+"lt", "gt", "b", "ltbgtltbgt", "reuters", "afp", "ap", "bloomberg", "cnn", "bbc", "say", "said", "says", "report", "reports", "reporting", "update", "breaking", "live", "exclusive")) # Removing days of the week, numbers, HTML artifacts, agency names, editorial markers, reporting words and other non-informative words that would otherwise overwhelm the corpus
+
+# Stemming
+title_corpus <- tm_map(title_corpus, stemDocument)
+
+data$title_clean <- sapply(title_corpus, as.character)
+
+# Removing empty documents
+row_totals_title <- nchar(data$title_clean)
+data_title <- data[row_totals_title > 0, ] %>% arrange(doc_id)
+title_corpus <- Corpus(VectorSource(data_title$title_clean))
+```
+
+```{r check_title_content, include=FALSE}
+# Checking randomly selected corpus titles to verify that the cleaning was performed successfully
+title_corpus[[1]]$content
+title_corpus[[74]]$content
+title_corpus[[5435]]$content
+title_corpus[[853]]$content
+title_corpus[[234]]$content
+```
+
+#### Tokenization of titles
+In this step, the article titles are transformed into a numerical representation using TF_IDF weighting method. Each title is represented as a vector of word weights that reflect both the importance of the term within a single title and its distinctiveness across the entire corpus.
+
+```{r tokenization_title}
+dtm_title <- DocumentTermMatrix(title_corpus)
+dtm_title_tfidf <- weightTfIdf(dtm_title, normalize = FALSE)
+```
+
+#### Reducing title matrix sparsity
+To reduce noise and improve efficiency, we remove very rare terms. With sparsity = 0.9975 we keep only terms that occur in at least 0.25% of titles.
+```{r red_sparsity_title}
+dtm_title_tfidf <- removeSparseTerms(dtm_title_tfidf, 0.9975)
+dtm_title_tfidf
+
+X_title <- as.matrix(dtm_title_tfidf)
+dim(X_title)
+```
+After removing very rare terms, the vocabulary size decreases to 392 terms. This step improves computational efficiency and reduces noise.
+
+## 3.2. Description preprocessing
+For description column preprocessing we remove unnecessary whitespaces, punctuation, numbers and stopwords, converted words to lowercase, cleaned the text of useless characters or non-informative words and applied stemming. Finally, we remove empty observations from the description corpus.
+
+```{r desc_preproc, message=FALSE, warning=FALSE}
+# Setting up corpus
+desc_source <- VectorSource(data$Description)
+desc_corpus <- Corpus(desc_source)
+
+# Cleaning
+desc_corpus <- tm_map(desc_corpus, removePunctuation)
+desc_corpus <- tm_map(desc_corpus, content_transformer(tolower))
+desc_corpus <- tm_map(desc_corpus, removeNumbers)
+desc_corpus <- tm_map(desc_corpus, removeWords, stopwords("english"))
+
+# Preliminary cleaning, substituting "/", "\", "@", "$" and "&" by a space.
+desc_corpus <- tm_map(desc_corpus, toSpace, "/")
+desc_corpus <- tm_map(desc_corpus, toSpace, "\\\\")
+desc_corpus <- tm_map(desc_corpus, toSpace, "@")
+desc_corpus <- tm_map(desc_corpus, toSpace, "\\$")
+desc_corpus <- tm_map(desc_corpus, toSpace, "&")
+desc_corpus <- tm_map(desc_corpus, toSpace, "\\)")
+desc_corpus <- tm_map(desc_corpus, toSpace, "\\(")
+desc_corpus <- tm_map(desc_corpus, stripWhitespace)
+desc_corpus <- tm_map(desc_corpus, removeWords, c("will", "reuters", "afp", "ap", "bloomberg", "cnn", "bbc", "lt", "gt", "b", "ltbgtltbgt", "one","two","first","second", "monday","tuesday","wednesday","thursday","friday","saturday","sunday", "year","years","week","weeks", "day", "days")) # Removing agency names, HTML artifacts, numbers, days of the week and other non-informative words that would otherwise overwhelm the corpus
+
+# Stemming
+desc_corpus <- tm_map(desc_corpus, stemDocument)
+
+data$desc_clean <- sapply(desc_corpus, as.character)
+
+# Removing empty documents
+row_totals_desc <- nchar(data$desc_clean)
+data_desc <- data[row_totals_desc > 0, ] %>% arrange(doc_id)
+desc_corpus <- Corpus(VectorSource(data_desc$desc_clean))
+```
+
+```{r check_desc_content, include=FALSE}
+# Checking randomly selected corpus titles to verify that the cleaning was performed successfully
+desc_corpus[[1]]$content
+desc_corpus[[74]]$content
+desc_corpus[[5435]]$content
+desc_corpus[[853]]$content
+desc_corpus[[234]]$content
+```
+
+#### Tokenization of descriptions
+In this step, the clean article descriptions are converted into a document-term matrix.
+
+```{r dtm_desc}
+dtm_desc <- DocumentTermMatrix(desc_corpus)
+```
+
+#### Reducing description matrix sparsity
+To reduce noise and improve efficiency, we remove very rare terms. With sparsity = 0.99 we keep only terms that occur in at least 1% of descriptions.
+
+```{r red_sparsity_desc}
+dtm_desc <- removeSparseTerms(dtm_desc, 0.99)
+dtm_desc
+
+# Removing empty documents
+row_totals_desc <- slam::row_sums(dtm_desc)
+dtm_desc  <- dtm_desc[row_totals_desc > 0, ]
+data_desc <- data_desc[row_totals_desc > 0, ]
+classes_desc <- data_desc$Class.Name
+```
+
+# 4. Exploratory data analysis
+In this step, we perform basic exploratory data analysis to familiarize ourselves with the dataset.
+
+```{r eda_dataset}
+# Number of observations
+nrow(data)
+
+# Class distribution
+table(data$Class.Name)
+```
+
+There are 127,600 observations in our dataset which contains 31,900 articles for each category from Business, Sci/Tech, Sports and World.
+
+```{r eda_mean}
+# Length of titles and descriptions
+data$title_length <- nchar(data$title_clean)
+data$desc_length  <- nchar(data$desc_clean)
+
+mean(data$title_length)
+mean(data$desc_length)
+```
+The mean title length is ~31 characters and the mean description length is ~122 characters.
+
+```{r eda_distrib_plot}
+ggplot(data, aes(x = title_length)) +
+  geom_histogram(bins = 50, fill = "#4F7F6A", color = "white") +
+  labs(
+    title = "Title length (characters)",
+    x = "nchar(title)",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", size = 15, color = "#1F4D3A"),
+  )
+
+
+ggplot(data, aes(x = desc_length)) +
+  geom_histogram(bins = 50, fill = "#4F7F6A", color = "white") +
+  labs(
+    title = "Description length (characters)",
+    x = "nchar(description)",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", size = 15, color = "#1F4D3A")
+  )
+
+```
+
+Titles are quite short with their length ranging from 0 to 75 characters, median around 30 and the distribution of the title length is close to normal with a slight right-skeweness. On the other hand, the articles' descriptions are longer with their length ranging from 0 to 380 characters and a median of ~70. The description length distribution is close to normal but it is more right-skewed than for the title length.
+
+After performing exploratory data analysis, we choose to do clustering and network analysis of titles and topic modeling on descriptions.
+
+#### Word frequency table of titles
+```{r eda_word_freq_count_title}
+v_title <- sort(col_sums(dtm_title), decreasing = TRUE)
+dtm_title_df <- data.frame(word = names(v_title), freq = as.numeric(v_title), row.names = NULL)
+
+head(dtm_title_df, 20)
+```
+
+#### Titles wordcloud
+```{r eda_wordcloud_title, warning=FALSE}
+wordcloud(words = dtm_title_df$word, freq = dtm_title_df$freq, min.freq = 500, colors = green_palette, random.order = FALSE)
+```
+
+From the title word frequency table and the title wordcloud we can conclude that most frequent title words are dominated by terms related to world and politics (such as oil, iraq, kills, china), business (such as microsoft, stock, deal, price, deal, profit), sport (such as game) and world (such as china, iraq).
+
+#### Word frequency table of descriptions
+```{r eda_word_freq_count_desc}
+v <- sort(col_sums(dtm_desc), decreasing = TRUE)
+dtm_desc_df <- data.frame(word = names(v), freq = v, row.names = NULL)
+
+head(dtm_desc_df, 20)
+```
+
+#### Descriptions wordcloud
+```{r eda_wordcloud_desc, warning=FALSE}
+wordcloud(words = dtm_desc_df$word, freq = dtm_desc_df$freq, min.freq = 500, colors = green_palette, random.order = FALSE)
+```
+
+From the description word frequency table and the description wordcloud we can conclude that most frequent description words are dominated by terms related to world and politics (such as presid), business (compani, inc, quot, price, corp) and sport (such as game).
+
+# 5. Text clustering of titles
+
+## 5.1. Silhouette score
+Since the dataset is quite big, the silhouette score is calculated on a stratified sample of 20,000 observations. In our source data, the frequencies of each category are equal, therefore each category will be equally represented in the data.
+
+```{r sample}
+set.seed(123)
+
+sample_n <- 20000   
+per_class <- floor(sample_n / 4)
+
+data_title$Class.Name <- as.factor(data_title$Class.Name)
+
+sample_idx <- unlist(lapply(levels(data_title$Class.Name), function(cls) {
+  idx_cls <- which(data_title$Class.Name == cls)
+  sample(idx_cls, per_class)
+}))
+
+sample_idx <- sample(sample_idx)
+
+X_sample <- X_title[sample_idx, , drop = FALSE]
+
+```
+
+```{r silhouette_score}
+fviz_nbclust(X_sample, kmeans, method = "silhouette") +
+  labs(title="Choosing k (sample)", subtitle=paste("Silhouette on", sample_n, "titles")) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", color = "#1F4D3A"),
+    plot.subtitle = element_text(color = "#4F7F6A"),
+    axis.title = element_text(color = "#1F4D3A"),
+    axis.text = element_text(color = "#4F7F6A")
+  )
+```
+
+The silhouette score is highest for k=4 clusters which is ideal in our case as it allows us to verify our hypothesis that the data naturally aligns with the four predefined categories.
+
+## 5.2. K-means clustering (k=4)
+```{r k_means}
+set.seed(1881)
+k <- 4
+clustering <- kmeans(X_title, centers = k, nstart = 50, iter.max = 100)
+
+table(clustering$cluster)
+
+# Removing zero-variance columns for visualization
+nzv <- apply(X_title, 2, sd) > 0
+X_vis <- X_title[, nzv, drop = FALSE]
+
+fviz_cluster(
+  list(data = X_vis, cluster = clustering$cluster),
+  geom = "point",
+  main = paste("Title clusters (k =", k, ")"),
+  subtitle = "k-means on TF-IDF titles",
+  palette = green_palette
+) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", color = "#1F4D3A"),
+    plot.subtitle = element_text(color = "#4F7F6A"),
+    axis.title = element_text(color = "#1F4D3A"),
+    axis.text = element_text(color = "#4F7F6A"),
+    legend.title = element_text(face = "bold", color = "#1F4D3A"),
+    legend.text = element_text(color = "#4F7F6A")
+  )
+```
+
+## 5.3. Titles with assigned cluster and original class label
+```{r doc_clust_table, warning=FALSE}
+documents_clusters <- data.frame(
+  Title = data_title$Title,
+  Title_clean = data_title$title_clean,
+  Class = data_title$Class.Name,
+  Cluster = clustering$cluster,
+  stringsAsFactors = FALSE
+)
+
+datatable(documents_clusters,
+          options = list(pageLength = 10),
+          caption = "Titles with assigned cluster and original class label")
+```
+
+## 5.4. Cluster vs class table
+In this step, we create a table to verify our hypothesis that the data naturally clusters into four categories corresponding to the predefined labels in the source data.
+```{r class_tab}
+cluster_class_tab <- table(
+  Cluster = clustering$cluster,
+  Class = data_title$Class.Name
+)
+
+cluster_class_tab
+prop.table(cluster_class_tab, margin = 1)
+```
+
+The initial hypothesis assumed that each of the four clusters would correspond to one predefined news category (World, Sports, Business, Sci/Tech). The cluster-class table does not fully support this assumption - there are two clusters that are dominated by one class but the other two clusters contain substantial proportions of multiple categories rather than being dominated by a single category. 
+
+Cluster 1 contains around 90% of all observations and is evenly mixed, therefore, it most likely captures generic headline language rather than category-specific content. 
+
+Cluster 2 is also quite evenly mixed but the category “Sci/Tech” dominates with corresponding to  almost 40% of observations in that cluster.
+
+Cluster 3 most definitely corresponds to the World category as 95% of observations in this cluster correspond to this class.
+
+Cluster 4 is also dominated by observations from one category as 80% of its observations belong to the Sci/Tech class.
+
+## 5.5. Top 20 terms per cluster
+
+```{r top_20_terms_per_cluster}
+top_terms_per_cluster <- lapply(1:k, function(i) {
+  idx <- which(clustering$cluster == i)
+  cluster_docs <- X_title[idx, , drop = FALSE]   # docs x terms
+  w <- sort(colSums(cluster_docs), decreasing = TRUE)
+
+  data.frame(
+    Cluster = i,
+    Term = names(w),
+    Score = as.numeric(w),
+    stringsAsFactors = FALSE
+  ) %>%
+    slice_head(n = 20)
+})
+
+top_terms_per_cluster_df <- bind_rows(top_terms_per_cluster)
+datatable(top_terms_per_cluster_df, options = list(pageLength = 10),
+          caption = "Top 20 terms per cluster")
+```
+
+## 5.6. Wordcloud per cluster
+
+```{r wordcloud_cluster}
+for (i in 1:k) {
+  idx <- which(clustering$cluster == i)
+  cluster_docs <- X_title[idx, , drop = FALSE]
+  w <- sort(colSums(cluster_docs), decreasing = TRUE)
+
+  wordcloud(
+    words = names(w),
+    freq = w,
+    max.words = 35,
+    scale = c(4, 0.8),
+    colors = green_palette,
+    random.order = FALSE
+  )
+
+  title(paste("Wordcloud for cluster", i))
+}
+```
+
+Cluster one is dominated by terms related to business (such as oil, microsoft, stock, price, profit, deal, rise, sale) and contains some words related to world and politics (such as iraq, china) as well as other terms that are difficult to classify due to different potential meaning (such as win, plan, take, back, talk, hit).
+
+Cluster 2 is dominated by terms related mostly to tech (such as game, video, microsoft, record, googl, system, phone). Other top terms are hard to classify due to different potential meanings depending on the context (words such as new, get, win, hit, plan, take, back). Some terms might also be related to sports (such as game, set, win). This is consistent with the findings in cluster vs class table (5.4.) that state that the most common category with 40% of total observations in that cluster belonging to that category is “Sci/Tech” and the second being “Sport”.
+
+Cluster 3 is completely dominated by political terms that are mostly related to conflicts around the world and military action. Aside from generic war related words (such as kill, bomb, blast, milit, attack, polic, crash, troop, injur), we can also draw conclusions on the specific conflicts mentioned most often. Keeping in mind that the dataset was last updated in 2020, the conflicts mentioned are between Israel and Palestine (probably in 2000s and 2010s) and the invasion of Iraq by the U.S. (2003-2011). These findings are consistent with the results of the cluster vs class table which show that 95% of observations in cluster 3 belong to the "World" category.
+
+Cluster 4 is dominated by terms related to technology (such as ibm, server, comput, power, sale, linux) which is consistent with the cluster vs class table’s findings that 80% of cluster 4’s observations belong to the Sci/Tech category.
+
+In conclusion, top TF-IDF terms and wordclouds reveal that there are strong thematic patterns in the clusters that in some cases do correspond to the predefined categories but these patterns are dimmed by terms that are difficult to classify due to different potential meaning.
+
+# 6. Topic modeling of article descriptions (LDA)
+To further explore the thematic structure of news content, topic modeling was applied to article descriptions to identify latent topics and examine their relationship with predefined news categories.
+
+## 6.1. Top keywords per topic (k = 4)
+
+```{r lda}
+# Choosing 4 topics
+k4 <- 4
+lda_model_k4 <- LDA(dtm_desc, k = k4, method = "Gibbs", control = list(seed = 1881))
+
+lda_topics_k4 <- tidy(lda_model_k4, matrix = "beta")
+
+top_terms_k4 <- lda_topics_k4 %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, desc(beta))
+
+ggplot(top_terms_k4, aes(reorder_within(term, beta, topic), beta, fill = as.factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_fill_manual(values = green_palette) +
+  labs(title = "Top words per topic (LDA, k = 4)",
+       x = NULL, y = "Word importance") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", color = "#1F4D3A"),
+    axis.title = element_text(color = "#1F4D3A"),
+    axis.text = element_text(color = "#4F7F6A"),
+  )
+```
+
+The LDA model with four topics reveals clear thematic structure within the corpus. Topic 1 is dominated by sports-related vocabulary, showing coverage of games, teams and recent sporting events. Topic 2 focuses on technology with frequent references to companies, corporate actions and software-related services. Topic 3 captures world content, characterized by government, state and presidential discourse. Finally, topic 4 reflects business reporting, particularly market trends, prices, and commodity-related news.
+
+## 6.2. Dominant topic per document (k = 4)
+
+```{r topic_dominance}
+lda_gamma_k4 <- tidy(lda_model_k4, matrix = "gamma") %>%
+  group_by(document) %>%
+  slice_max(gamma, n = 1)
+
+ggplot(lda_gamma_k4, aes(x = factor(topic))) +
+  geom_bar(fill = "#4F7F6A", width = 0.6, alpha = 0.8) +
+  labs(
+    title = "Number of documents per dominant topic (k = 4)",
+    x = "Topic",
+    y = "Count of documents"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", color = "#1F4D3A"),
+    axis.title = element_text(color = "#1F4D3A"),
+    axis.text = element_text(color = "#4F7F6A"))
+
+
+```
+
+The bar chart shows a relatively balanced distribution of documents across the four dominant topics. This suggests that the topics are equally represented in the dataset. Such a result is consistent with the earlier exploratory data analysis, which showed a similar balance across the four original news categories.
+
+## 6.3. Topic prevelance by class (k = 4)
+
+```{r topic_prevelance}
+gamma_k4 <- posterior(lda_model_k4)$topics
+topic_prevalence_k4 <- aggregate(gamma_k4, by = list(Class = classes_desc), FUN = mean)
+head(topic_prevalence_k4)
+```
+
+The table shows that topic proportions are relatively balanced across all four news classes. Each class contains a similar mix of topics, with only minor differences in their average prevalence. This indicates that the topics extracted by the LDA model are not strictly class-specific, but rather capture broader themes that cut across different types of news. 
+
+Another potential reason as to why topics extracted by LDA do not each correspond to a specific predefined category is a finding from the text clustering which states that this relationship would be more distinct, was it not for the prevalence of terms that are difficult to classify due to different potential meaning (such as new, get, win, hit, plan, take, back).
+
+
+# 7. Network analysis
+To further explore how news categories differ in their language patterns, a network analysis of word co-occurrences in article titles was conducted using bigram-based representations.
+
+```{r table_network_a}
+titles_tbl <- data %>%
+  transmute(
+    id = row_number(),
+    Class.Name,
+    text = title_clean
+  ) %>%
+  filter(!is.na(text), text != "")
+```
+
+## 7.1. Bigram Network Analysis (TF-IDF)
+
+```{r bigram_network}
+stop_words_vec <- stopwords("english")
+
+# Generating bigrams and calculating TF-IDF
+bigram_tf_idf <- titles_tbl %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!is.na(word1), !is.na(word2)) %>%
+  filter(!word1 %in% stop_words_vec, !word2 %in% stop_words_vec) %>%
+  unite(bigram, word1, word2, sep = " ") %>%
+  count(Class.Name, bigram) %>%
+  bind_tf_idf(bigram, Class.Name, n)
+
+# Building edge list with weight equal to sum of TF-IDF
+bigram_edges <- bigram_tf_idf %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+  group_by(Class.Name, word1, word2) %>%
+  summarise(weight = sum(tf_idf), .groups = "drop") %>%
+  arrange(Class.Name, desc(weight))
+```
+
+## 7.2. Bigram TF-IDF barplot
+
+```{r bigram_barplot}
+# Bigram TF-IDF barplot
+bigram_tf_idf_top <- bigram_tf_idf %>%
+  group_by(Class.Name) %>%
+  slice_max(tf_idf, n = 20, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(bigram_tf_idf_top, aes(x = fct_reorder(bigram, tf_idf), y = tf_idf)) +
+  geom_col(fill = "#4F7F6A") +
+  coord_flip() +
+  facet_wrap(~ Class.Name, scales = "free_y") +
+  labs(
+    title = "Top 20 distinctive bigrams by news category (TF-IDF)",
+    subtitle = "Bigram TF-IDF computed on article titles",
+    x = "Bigram",
+    y = "TF-IDF score"
+  ) +
+  theme(axis.text.y = element_text(size = 3)) +
+  theme_minimal(base_size = 9) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", color = "#1F4D3A"),
+    plot.subtitle = element_text(color = "#4F7F6A"),
+    axis.title = element_text(color = "#1F4D3A"),
+    axis.text = element_text(color = "#4F7F6A"))
+```
+
+The bar plots present the most distinctive bigrams for each news category based on TF-IDF scores. Each category is characterized by clearly domain-specific word pairs, such as financial and market-related expressions in Business, technology and product terms in Sci/Tech and event-focused phrases in Sports. The World category is dominated by bigrams related to international politics, conflicts and geopolitical events. The limited overlap between top bigrams across categories shows that headline language differs substantially between news domains. This confirms that article titles use concise but category-specific word combinations to signal content type effectively.
+
+## 7.3. Bigram edges
+
+```{r bigram_edges}
+bigram_edges %>% head(10)
+```
+
+The table presents example bigram edges together with their aggregated TF-IDF weights. Each edge represents a pair of words that frequently co-occur in article titles, with higher weights indicating stronger and more distinctive associations. Showed examples illustrate that the strongest connections in the Business category are dominated by financial and market-related terms (such as oil price, crude oil, us stock and hous price). These weighted edges form the basis for constructing the bigram network and identifying the most relevant word relationships in subsequent analyses.
+
+## 7.4. Bigram Network analysis - bigram TF-IDF
+
+```{r bigram_graph}
+# Creating graph from edge list 
+make_graph <- function(edges, threshold = 20, directed = FALSE) {
+  edges %>%
+    filter(weight >= threshold) %>%
+    graph_from_data_frame(directed = directed)
+}
+
+largest_cc <- function(g) {
+  comp <- components(g)
+  induced_subgraph(g, vids = which(comp$membership == which.max(comp$csize)))
+}
+
+add_graph_attributes <- function(g) {
+  V(g)$degree <- strength(g, weights = E(g)$weight)
+  E(g)$width  <- E(g)$weight / max(E(g)$weight)
+  g
+}
+
+# Static plot
+plot_igraph_simple <- function(g, threshold, title = "Word bigram co-occurrence Network") {
+  plot(
+    g,
+    vertex.size = 1,
+    vertex.label.color = "black",
+    vertex.label.cex = 0.7,
+    vertex.label.dist = 1,
+    edge.color = "lightblue",
+    main = title,
+    sub = glue::glue("Weight threshold: {threshold}"),
+    alpha = 50
+  )
+}
+
+# Interactive plot
+plot_force_d3 <- function(g, fontSize = 12, group_vec = NULL) {
+  g <- add_graph_attributes(g)
+  
+  net <- igraph_to_networkD3(g)
+  
+  net$nodes <- net$nodes %>%
+    mutate(Degree = 1e-2 * V(g)$degree)
+  
+  if (is.null(group_vec)) {
+    net$nodes$Group <- 1
+  } else {
+    net$nodes$Group <- group_vec
+  }
+  
+  net$links$Width <- 10 * E(g)$width
+  
+  forceNetwork(
+    Links = net$links,
+    Nodes = net$nodes,
+    Source = "source",
+    Target = "target",
+    NodeID = "name",
+    Group = "Group",
+    opacity = 0.9,
+    Value = "Width",
+    Nodesize = "Degree",
+    linkWidth = JS("function(d) { return Math.sqrt(d.value); }"),
+    fontSize = 12,
+    zoom = TRUE,
+    opacityNoHover = 1
+  )
+}
+```
+
+```{r threshold, warning=FALSE}
+edges_all <- bigram_edges %>%
+  select(word1, word2, weight)
+
+# Checking if weights are skewed
+edges_all %>%
+  ggplot(aes(weight)) +
+  geom_histogram(bins = 50, fill = "#4F7F6A") +
+  scale_x_log10() +
+  labs(
+    title = "Bigram edge weights (log scale)",
+    x = "weight (log10)",
+    y = "count of edges"
+  ) +
+  theme(axis.text.y = element_text(size = 9)) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(face = "bold", color = "#1F4D3A"),
+    axis.title = element_text(color = "#1F4D3A"),
+    axis.text = element_text(color = "#4F7F6A"))
+```
+
+The distribution of bigram edge weights is highly skewed, with most connections having very low TF-IDF values and only a small number of strong edges. Without applying a threshold, the resulting network becomes extremely dense and visually cluttered, forming a so-called hairball structure that is difficult to interpret. Therefore, retaining only the strongest connections is necessary to obtain a readable and meaningful network representation.
+
+## 7.5. Bigram network: build and plot graphs
+
+```{r bigram_plots_build}
+# Choosing threshold
+bigram_threshold <- as.numeric(quantile(edges_all$weight, 0.99, na.rm = TRUE))
+
+edges_all_top <- edges_all %>%
+  filter(weight >= bigram_threshold) %>%
+  arrange(desc(weight)) %>%
+  head(200) 
+
+g_bigram <- graph_from_data_frame(edges_all_top, directed = FALSE)
+g_bigram_cc <- largest_cc(g_bigram)
+
+cat("Bigram CC nodes:", vcount(g_bigram_cc))
+cat("Bigram CC edges:", ecount(g_bigram_cc))
+```
+
+## 7.6. Bigram network visualization
+
+```{r bigram_plots}
+plot_force_d3(g_bigram_cc, 
+              fontSize = 12)
+```
+
+The visualization presents the strongest word co-occurrences in article titles after applying TF-IDF filtering and thresholding. Nodes represent individual words, while edges indicate frequent and informative bigram connections. Central nodes highlight terms that co-occur with many others and therefore play a key role in headline construction.
+
+Overall, the bigram network shows that news headlines are structured around a small set of highly central terms that connect multiple thematic areas. Words related to geopolitics and conflict form the core of the network and are frequently linked to broader contextual terms. These central concepts act as hubs, connecting more specific events such as elections, military actions or economic decisions. Smaller clusters represent narrower storylines, for example related to markets or technology, which remain connected to the core but appear less dominant.
+
+This structure likely reflects the global context of the period covered by the dataset (2004-2019), which was shaped by international conflicts, geopolitical tensions, and major political and economic events.
+
+## 7.7. Node importance (centrality) on the largest CC
+
+```{r node_importance1}
+g_analysis <- g_bigram_cc
+
+node_impo_df <- tibble(
+  word = V(g_analysis)$name,
+  degree = strength(g_analysis, weights = E(g_analysis)$weight),
+  closeness = closeness(g_analysis, weights = 1 / E(g_analysis)$weight, normalized = TRUE),
+  betweenness = betweenness(g_analysis, weights = 1 / E(g_analysis)$weight, normalized = TRUE)
+)
+
+# Top 10 by each measure
+node_impo_df %>% arrange(desc(degree)) %>% head(10)
+```
+
+The centrality analysis highlights several words that play a key role in connecting different parts of the bigram network. Terms such as "kill", "iraq", "us" and "soldier" have the highest degree and betweenness values, showing that they frequently co-occur with many other words and act as bridges between different thematic clusters. This suggests that news headlines are strongly centered around conflict-related and geopolitical narratives. Words like "stock" and "cup" also appear among central nodes, showing that economic and sports-related topics are present but less dominant in linking the overall discourse. Overall, the centrality structure confirms that violence, war, and international politics form the core framing of news titles in the analyzed period.
+
+```{r node_importance2}
+node_impo_df %>% arrange(desc(closeness)) %>% head(10)
+```
+
+The closeness centrality results indicate which words are, on average, the most proximate to all other nodes in the network. Terms such as "kill", "iraq", "soldier" and "us" exhibit relatively high closeness values, suggesting that they are embedded near the core of the network structure. This means that these words can be reached from other terms through relatively short paths, reflecting their central position in headline language. Many of these terms are directly related to conflict and military contexts, highlighting the central role of geopolitical themes in the dataset. Overall, the closeness measure confirms that conflict-related vocabulary forms the structural center of the bigram network.
+
+```{r node_importance3}
+node_impo_df %>% arrange(desc(betweenness)) %>% head(10)
+```
+
+Betweenness centrality highlights words that act as bridges between different parts of the bigram network. Terms such as "kill", "iraq", "palestinian" and "us" show high betweenness values, showing that they frequently connect weakly linked clusters of words. This suggests that these terms play an important role in linking multiple narrative threads within news headlines. In practice, they function as connective elements between topics related to conflict, geopolitics and international relations. Overall, the results indicate that conflict-related vocabulary not only appears frequently, but also structurally connects different semantic areas of the network.
+
+## 7.8. Community detection (Louvain) interactive coloring
+
+```{r community_detection}
+comm_det <- cluster_louvain(g_analysis, weights = E(g_analysis)$weight)
+V(g_analysis)$membership <- as.vector(membership(comm_det))
+
+# The number of communities
+length(unique(V(g_analysis)$membership))
+```
+
+The Louvain community detection identified eight distinct communities, indicating that the bigram network is organized into several coherent semantic substructures rather than forming a single homogeneous cluster.
+
+```{r interactive_plot}
+# Interactive plot colored by community
+plot_force_d3(
+  g_analysis,
+  fontSize = 12,
+  group_vec = V(g_analysis)$membership
+)
+```
+
+The visualization shows that the network splits into multiple communities, each representing a distinct group of closely related words, which confirms that headline language is structured around several parallel themes rather than a single narrative. The main communities can be grouped into such categories: nuclear power, business, international politics, war-related articles and elections.
+
+# 8. Summary and conclusions
+This project achieved its purpose by using text mining methods to explore whether news content in the AG dataset forms meaningful structures and how these relate to the predefined labels. The main hypothesis that the titles naturally cluster into the four original categories was tested with k-means clustering but the cluster-class table showed only partial alignment, meaning that the title level language overlaps strongly across categories and clusters often capture generic headline type rather than one class. 
+
+
+LDA topic modeling on descriptions confirmed that conclusion in the case of descriptions as well - it found clear interpretable themes corresponding to the four categories but the language used also overlapped across categories due to the prevalence of words carrying different meaning depending on context.
+
+
+Finally, the bigram TF-IDF network and community detection confirmed that categories differ in distinctive phrase patterns and revealed several coherent discourse communities, supporting the conclusion that category signals are stronger in multi-word expressions and longer descriptions than in short titles alone.
